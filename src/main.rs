@@ -3,6 +3,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
+use std::io::Error as IoError;
+use std::path::Path;
+use std::sync::Arc;
+
+use async_std::{fs::OpenOptions, io};
+use tempfile::TempDir;
+use tide::prelude::*;
+use tide::{Body, Request, Response, StatusCode};
+
+use handlebars::Handlebars;
+use std::collections::BTreeMap;
+use tide_handlebars::prelude::*;
+
 /// This program does something useful, but its author needs to edit this.
 /// Else it will be just hanging around forever
 #[derive(Debug, Clone, ClapParser, Serialize, Deserialize)]
@@ -21,7 +34,40 @@ struct Opts {
     verbose: i32,
 }
 
-fn main() {
+#[derive(Clone)]
+struct AyTestState {
+    tempdir: Arc<TempDir>,
+    registry: Handlebars<'static>,
+}
+
+impl AyTestState {
+    fn try_new() -> Result<Self, IoError> {
+        Ok(Self {
+            tempdir: Arc::new(tempfile::tempdir()?),
+            registry: Handlebars::new(),
+        })
+    }
+
+    fn path(&self) -> &Path {
+        self.tempdir.path()
+    }
+}
+
+#[derive(Deserialize)]
+struct RequestQuery {
+    url: String,
+}
+
+async fn request_url(mut req: Request<AyTestState>) -> tide::Result {
+    let RequestQuery { url } = req.query()?; // .unwrap();
+    let mut res: surf::Response = surf::get(url).await?;
+    let data: String = res.body_string().await?;
+
+    Ok(data.into())
+}
+
+#[async_std::main]
+async fn main() -> tide::Result<()> {
     let opts: Opts = Opts::parse();
 
     // allow to load the options, so far there is no good built-in way
@@ -51,4 +97,9 @@ fn main() {
     println!("Hello, here is your options: {:#?}", &opts);
 
     std::thread::sleep(std::time::Duration::from_secs(1));
+    let mut state = AyTestState::try_new()?;
+    let mut app = tide::with_state(state);
+    app.at("/request").get(request_url);
+    app.listen("127.0.0.1:4000").await?;
+    Ok(())
 }
