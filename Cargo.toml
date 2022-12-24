@@ -17,4 +17,6 @@ tempfile = "*"
 handlebars = { version = "*", features = ["dir_source"] }
 tide-handlebars = "*"
 surf = "*"
+sqlx = { version = "*", features = [ "runtime-async-std-native-tls", "postgres", "sqlite" ] }
+
 

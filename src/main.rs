@@ -25,6 +25,10 @@ struct Opts {
     #[clap(short, long, default_value = "localhost")]
     target_host: String,
 
+    /// Database path
+    #[clap(short)]
+    db: String,
+
     /// Override options from this yaml/json file
     #[clap(short, long)]
     options_override: Option<String>,
@@ -34,16 +38,41 @@ struct Opts {
     verbose: i32,
 }
 
+enum DbPool {
+    Sqlite(sqlx::sqlite::SqlitePool),
+    Pg(sqlx::postgres::PgPool),
+}
+
+use sqlx::{FromRow, Row};
+#[derive(Debug, FromRow, Clone)]
+struct ApActor {
+    id: i64,
+    name: String,
+    pubkey: String,
+    privkey: String,
+}
+
+macro_rules! xdb {
+    ($db:ident, $pool:ident, $tree: tt) => {
+        match &$db {
+            DbPool::Sqlite($pool) => $tree,
+            DbPool::Pg($pool) => $tree,
+        }
+    };
+}
+
 #[derive(Clone)]
 struct AyTestState {
     tempdir: Arc<TempDir>,
+    db: Arc<DbPool>,
     registry: Handlebars<'static>,
 }
 
 impl AyTestState {
-    fn try_new() -> Result<Self, IoError> {
+    fn try_new(db: DbPool) -> Result<Self, IoError> {
         Ok(Self {
             tempdir: Arc::new(tempfile::tempdir()?),
+            db: Arc::new(db),
             registry: Handlebars::new(),
         })
     }
@@ -96,8 +125,59 @@ async fn main() -> tide::Result<()> {
 
     println!("Hello, here is your options: {:#?}", &opts);
 
+    use sqlx::Row;
+    let db = if opts.db.starts_with("sqlite://") {
+        let p = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect(&opts.db)
+            .await
+            .unwrap();
+        DbPool::Sqlite(p)
+    } else if opts.db.starts_with("postgresql://") {
+        let p = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&opts.db)
+            .await
+            .unwrap();
+        DbPool::Pg(p)
+    } else {
+        panic!("Need a database path");
+    };
+    println!("Connected to a db");
+
+    match &db {
+        DbPool::Sqlite(pool) => {
+            sqlx::query(
+                r#"
+CREATE TABLE IF NOT EXISTS actors (
+  id integer primary key autoincrement,
+  name text,
+  pubkey text,
+  privkey text
+);"#,
+            )
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        DbPool::Pg(pool) => {
+            sqlx::query(
+                r#"
+CREATE TABLE IF NOT EXISTS actors (
+  id bigserial,
+  name text,
+  pubkey text,
+  privkey text
+);"#,
+            )
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    };
+
     std::thread::sleep(std::time::Duration::from_secs(1));
-    let mut state = AyTestState::try_new()?;
+    let mut state = AyTestState::try_new(db)?;
     let mut app = tide::with_state(state);
     app.at("/request").get(request_url);
     app.listen("127.0.0.1:4000").await?;
