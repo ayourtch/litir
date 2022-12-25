@@ -111,6 +111,49 @@ async fn new_actor(mut req: Request<AyTestState>) -> tide::Result {
     Ok("".into())
 }
 
+#[derive(Deserialize)]
+struct WebfingerQuery {
+    resource: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WebfingerLink {
+    rel: String,
+    #[serde(rename = "type")]
+    typ: String,
+    href: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WebfingerReply {
+    subject: String,
+    links: Vec<WebfingerLink>,
+}
+
+async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
+    let WebfingerQuery { resource } = req.query()?;
+    let mut json_reply = "".to_string();
+    if resource.starts_with("acct:") {
+        let fqdn = &resource[5..];
+        let name = fqdn.split("@").nth(0).unwrap();
+
+        let mut links: Vec<WebfingerLink> = vec![];
+        let mylink = WebfingerLink {
+            rel: "self".to_string(),
+            typ: "application/activity+json".to_string(),
+            href: format!("https://x25.me/users/{}", &name),
+        };
+        links.push(mylink);
+        let rep = WebfingerReply {
+            subject: resource,
+            links,
+        };
+        json_reply = serde_json::to_string(&rep).unwrap()
+    }
+
+    Ok(json_reply.into())
+}
+
 async fn make_user(db: &DbPool, name: &str) -> i64 {
     use openssl::rsa::{Padding, Rsa};
     use openssl::symm::Cipher;
@@ -235,6 +278,7 @@ CREATE TABLE IF NOT EXISTS actors (
     let mut app = tide::with_state(state);
     app.at("/request").get(request_url);
     app.at("/new-actor").get(new_actor);
+    app.at("/.well-known/webfinger").get(webfinger);
     app.listen("127.0.0.1:4000").await?;
     Ok(())
 }
