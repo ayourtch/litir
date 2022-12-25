@@ -95,6 +95,42 @@ async fn request_url(mut req: Request<AyTestState>) -> tide::Result {
     Ok(data.into())
 }
 
+async fn make_user(db: &DbPool, name: &str) {
+    use openssl::rsa::{Padding, Rsa};
+    use openssl::symm::Cipher;
+    println!("Generate user");
+
+    let passphrase = "litir_test";
+
+    let rsa = Rsa::generate(1024).unwrap();
+    let private_key: Vec<u8> = rsa
+        .private_key_to_pem_passphrase(Cipher::aes_128_cbc(), passphrase.as_bytes())
+        .unwrap();
+    let public_key: Vec<u8> = rsa.public_key_to_pem().unwrap();
+
+    let privkey = String::from_utf8(private_key).unwrap();
+    let pubkey = String::from_utf8(public_key).unwrap();
+    println!("Private key: {}", &privkey);
+    println!("Public key: {}", &pubkey);
+
+    {
+        let newid = xdb!(db, pool, {
+            let row: (i64,) = sqlx::query_as(
+                "insert into actors (name, pubkey, privkey) values ($1, $2, $3) returning id",
+            )
+            .bind(name)
+            .bind(pubkey.replace("\n", r#"\n"#))
+            .bind(privkey.replace("\n", r#"\n"#))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            row.0
+        });
+
+        println!("New id: {:?}", newid);
+    }
+}
+
 #[async_std::main]
 async fn main() -> tide::Result<()> {
     let opts: Opts = Opts::parse();
@@ -175,6 +211,7 @@ CREATE TABLE IF NOT EXISTS actors (
             .unwrap();
         }
     };
+    let () = make_user(&db, "testuser").await;
 
     std::thread::sleep(std::time::Duration::from_secs(1));
     let mut state = AyTestState::try_new(db)?;

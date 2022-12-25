@@ -1434,6 +1434,7 @@ dependencies = [
  "clap",
  "handlebars 4.3.6",
  "minreq",
+ "openssl",
  "serde",
  "serde_json",
  "serde_yaml",
