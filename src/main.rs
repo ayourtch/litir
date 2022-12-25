@@ -130,6 +130,16 @@ struct WebfingerReply {
     links: Vec<WebfingerLink>,
 }
 
+async fn get_user(db: &DbPool, name: &str) -> Option<ApActor> {
+    let users: Vec<ApActor> = xdb!(db, pool, {
+        let select_query =
+            sqlx::query_as("SELECT id, name, pubkey, privkey FROM actors where name=$1").bind(name);
+        select_query.fetch_all(pool).await.unwrap()
+    });
+    println!("Got: #{:?}", &users);
+    None
+}
+
 async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
     let WebfingerQuery { resource } = req.query()?;
     let mut json_reply = "".to_string();
@@ -138,6 +148,7 @@ async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
         let name = fqdn.split("@").nth(0).unwrap();
 
         let mut links: Vec<WebfingerLink> = vec![];
+        let maybe_actor = get_user(req.state().pool(), &name).await;
         let mylink = WebfingerLink {
             rel: "self".to_string(),
             typ: "application/activity+json".to_string(),
