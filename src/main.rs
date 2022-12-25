@@ -77,6 +77,10 @@ impl AyTestState {
         })
     }
 
+    fn pool(&self) -> &DbPool {
+        &self.db
+    }
+
     fn path(&self) -> &Path {
         self.tempdir.path()
     }
@@ -95,7 +99,19 @@ async fn request_url(mut req: Request<AyTestState>) -> tide::Result {
     Ok(data.into())
 }
 
-async fn make_user(db: &DbPool, name: &str) {
+#[derive(Deserialize)]
+struct NewActorQuery {
+    name: String,
+}
+
+async fn new_actor(mut req: Request<AyTestState>) -> tide::Result {
+    let NewActorQuery { name } = req.query()?; // .unwrap();
+    let id = make_user(&req.state().pool(), &name).await;
+
+    Ok("".into())
+}
+
+async fn make_user(db: &DbPool, name: &str) -> i64 {
     use openssl::rsa::{Padding, Rsa};
     use openssl::symm::Cipher;
     println!("Generate user");
@@ -128,6 +144,7 @@ async fn make_user(db: &DbPool, name: &str) {
         });
 
         println!("New id: {:?}", newid);
+        newid
     }
 }
 
@@ -211,12 +228,13 @@ CREATE TABLE IF NOT EXISTS actors (
             .unwrap();
         }
     };
-    let () = make_user(&db, "testuser").await;
+    // make_user(&db, "testuser").await;
 
     std::thread::sleep(std::time::Duration::from_secs(1));
     let mut state = AyTestState::try_new(db)?;
     let mut app = tide::with_state(state);
     app.at("/request").get(request_url);
+    app.at("/new-actor").get(new_actor);
     app.listen("127.0.0.1:4000").await?;
     Ok(())
 }
