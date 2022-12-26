@@ -157,6 +157,14 @@ async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
 
         let mut links: Vec<WebfingerLink> = vec![];
         let maybe_actor = db_get_user(req.state().pool(), &name).await;
+        if maybe_actor.is_none() {
+            return Ok(Response::builder(404)
+                .body("")
+                .header("cache-control", "max-age=60, public")
+                .content_type(mime::HTML)
+                .build());
+        }
+
         let mylink = WebfingerLink {
             rel: "self".to_string(),
             typ: "application/activity+json".to_string(),
