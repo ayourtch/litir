@@ -180,6 +180,39 @@ async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
 
     Ok(json_reply.into())
 }
+async fn test_sign(mut req: Request<AyTestState>) -> tide::Result {
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::sign::{Signer, Verifier};
+    use std::fmt::Write;
+    println!("Test sign");
+    let name = format!("testayourtch");
+    let maybe_actor = db_get_user(req.state().pool(), &name).await;
+    let actor = maybe_actor.unwrap();
+
+    let private_key_pem = actor.privkey.clone().replace(r#"\n"#, "\n");
+    let passphrase = "litir_test";
+
+    let rsa =
+        Rsa::private_key_from_pem_passphrase(private_key_pem.as_bytes(), passphrase.as_bytes())
+            .unwrap();
+
+    let keypair = PKey::from_rsa(rsa).unwrap();
+
+    let data = b"hello, world!";
+
+    // Sign the data
+    let mut signer = Signer::new(MessageDigest::sha256(), &keypair).unwrap();
+    signer.update(data).unwrap();
+    let signature = signer.sign_to_vec().unwrap();
+
+    let mut out = openssl::base64::encode_block(&signature);
+
+    // let mut out = format!("");
+    // writeln!(out, "Result:");
+    Ok(out.into())
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct JsonActivityPublicKey {
@@ -403,6 +436,7 @@ CREATE TABLE IF NOT EXISTS actors (
     let mut app = tide::with_state(state);
     app.at("/request").get(request_url);
     app.at("/users/:username").get(users_handler);
+    app.at("/test-sign").get(test_sign);
     app.at("/new-actor").get(new_actor);
     app.at("/.well-known/webfinger").get(webfinger);
     app.listen("127.0.0.1:4000").await?;
