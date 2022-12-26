@@ -255,17 +255,22 @@ async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
         return Ok("Error".into());
     }
     let user = maybe_actor.unwrap();
+    let accept_str = format!("{}", accept[0]);
+    println!("Accept str: '{}'", &accept_str);
 
-    if accept[0] == "application/json"
-        || accept[0] == "application/activity+json"
-        || accept[0] == "application/ld+json"
+    if accept_str.starts_with("application/json")
+        || accept_str.starts_with("application/activity+json")
+        || accept_str.starts_with("application/ld+json")
     {
+        println!("Sending json reply");
+
         Ok(Response::builder(200)
             .body(get_actor_json(&user))
             .header("content-type", "application/activity+json; charset=utf-8")
             .header("cache-control", "max-age=60, public")
             .build())
     } else {
+        println!("Sending html reply");
         Ok(Response::builder(200)
             .body(get_actor_html(&user))
             .header("cache-control", "max-age=60, public")
