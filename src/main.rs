@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_std::{fs::OpenOptions, io};
 use tempfile::TempDir;
 use tide::prelude::*;
-use tide::{Body, Request, Response, StatusCode};
+use tide::{http::mime, Body, Redirect, Request, Response, Server, StatusCode};
 
 use handlebars::Handlebars;
 use std::collections::BTreeMap;
@@ -192,16 +192,16 @@ struct UserJsonActivity {
     publicKey: JsonActivityPublicKey,
 }
 
-async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
-    println!("Users handler");
-    let username: String = req.param("username")?.into();
-    let maybe_actor = db_get_user(req.state().pool(), &username).await;
-    if maybe_actor.is_none() {
-        return Ok("Error".into());
-    }
-    let user = maybe_actor.unwrap();
+fn get_actor_html(user: &ApActor) -> String {
+    use std::fmt::Write;
+    let mut out = format!("<html><body>\n");
+    writeln!(out, "<h1>{}</h1>", &user.name);
+    writeln!(out, "</body></html>");
+    out
+}
 
-    let user_url = format!("https://{}/users/{}", root_fqdn(), &username);
+fn get_actor_json(user: &ApActor) -> String {
+    let user_url = format!("https://{}/users/{}", root_fqdn(), &user.name);
 
     let publicKey = JsonActivityPublicKey {
         id: format!("{}#main-key", &user_url),
@@ -220,13 +220,50 @@ async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
         context,
         typ: "Person".to_string(),
         id: user_url.clone(),
-        preferredUsername: username.clone(),
+        preferredUsername: user.name.clone(),
         inbox,
         publicKey,
     };
 
     let json_reply = serde_json::to_string(&actor).unwrap();
-    Ok(json_reply.into())
+    json_reply
+}
+
+async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
+    use http_types::headers::HeaderValues;
+    use http_types::headers::ToHeaderValues;
+    println!("Users handler");
+    for h in req.header_names() {
+        println!("   {}", &h);
+    }
+    let default_accept = format!("*/*").to_header_values().unwrap().collect();
+
+    let accept = req.header("accept").unwrap_or(&default_accept);
+    println!("Accept: {:#?}", &accept);
+
+    let username: String = req.param("username")?.into();
+    let maybe_actor = db_get_user(req.state().pool(), &username).await;
+    if maybe_actor.is_none() {
+        return Ok("Error".into());
+    }
+    let user = maybe_actor.unwrap();
+
+    if accept[0] == "application/json"
+        || accept[0] == "application/activity+json"
+        || accept[0] == "application/ld+json"
+    {
+        Ok(Response::builder(200)
+            .body(get_actor_json(&user))
+            .header("content-type", "application/activity+json; charset=utf-8")
+            .header("cache-control", "max-age=60, public")
+            .build())
+    } else {
+        Ok(Response::builder(200)
+            .body(get_actor_html(&user))
+            .header("cache-control", "max-age=60, public")
+            .content_type(mime::HTML)
+            .build())
+    }
 }
 
 async fn make_user(db: &DbPool, name: &str) -> i64 {

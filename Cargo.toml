@@ -19,5 +19,6 @@ tide-handlebars = "*"
 surf = "*"
 sqlx = { version = "*", features = [ "runtime-async-std-native-tls", "postgres", "sqlite" ] }
 openssl = { version = "*" }
+http-types = { version = "*" }
 
 

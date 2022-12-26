@@ -1433,6 +1433,7 @@ dependencies = [
  "async-std",
  "clap",
  "handlebars 4.3.6",
+ "http-types",
  "minreq",
  "openssl",
  "serde",
