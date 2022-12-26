@@ -130,14 +130,22 @@ struct WebfingerReply {
     links: Vec<WebfingerLink>,
 }
 
-async fn get_user(db: &DbPool, name: &str) -> Option<ApActor> {
+fn root_fqdn() -> String {
+    format!("x25.me")
+}
+
+async fn db_get_user(db: &DbPool, name: &str) -> Option<ApActor> {
     let users: Vec<ApActor> = xdb!(db, pool, {
         let select_query =
             sqlx::query_as("SELECT id, name, pubkey, privkey FROM actors where name=$1").bind(name);
         select_query.fetch_all(pool).await.unwrap()
     });
     println!("Got: #{:?}", &users);
-    None
+    if users.len() == 0 {
+        None
+    } else {
+        Some(users[0].clone())
+    }
 }
 
 async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
@@ -148,11 +156,11 @@ async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
         let name = fqdn.split("@").nth(0).unwrap();
 
         let mut links: Vec<WebfingerLink> = vec![];
-        let maybe_actor = get_user(req.state().pool(), &name).await;
+        let maybe_actor = db_get_user(req.state().pool(), &name).await;
         let mylink = WebfingerLink {
             rel: "self".to_string(),
             typ: "application/activity+json".to_string(),
-            href: format!("https://x25.me/users/{}", &name),
+            href: format!("https://{}/users/{}", root_fqdn(), &name),
         };
         links.push(mylink);
         let rep = WebfingerReply {
@@ -162,6 +170,62 @@ async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
         json_reply = serde_json::to_string(&rep).unwrap()
     }
 
+    Ok(json_reply.into())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct JsonActivityPublicKey {
+    id: String,
+    owner: String,
+    publicKeyPem: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct UserJsonActivity {
+    #[serde(rename = "@context")]
+    context: Vec<String>, /* not quite right but will work for now */
+    id: String,
+    #[serde(rename = "type")]
+    typ: String,
+    preferredUsername: String,
+    inbox: String,
+    publicKey: JsonActivityPublicKey,
+}
+
+async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
+    println!("Users handler");
+    let username: String = req.param("username")?.into();
+    let maybe_actor = db_get_user(req.state().pool(), &username).await;
+    if maybe_actor.is_none() {
+        return Ok("Error".into());
+    }
+    let user = maybe_actor.unwrap();
+
+    let user_url = format!("https://{}/users/{}", root_fqdn(), &username);
+
+    let publicKey = JsonActivityPublicKey {
+        id: format!("{}#main-key", &user_url),
+        owner: user_url.clone(),
+        publicKeyPem: user.pubkey.clone(),
+    };
+
+    let context = vec![
+        "https://www.w3.org/ns/activitystreams".to_string(),
+        "https://w3id.org/security/v1".to_string(),
+    ];
+
+    let inbox = format!("{}/inbox", &user_url);
+
+    let actor = UserJsonActivity {
+        context,
+        typ: "Person".to_string(),
+        id: user_url.clone(),
+        preferredUsername: username.clone(),
+        inbox,
+        publicKey,
+    };
+
+    let json_reply = serde_json::to_string(&actor).unwrap();
     Ok(json_reply.into())
 }
 
@@ -288,6 +352,7 @@ CREATE TABLE IF NOT EXISTS actors (
     let mut state = AyTestState::try_new(db)?;
     let mut app = tide::with_state(state);
     app.at("/request").get(request_url);
+    app.at("/users/:username").get(users_handler);
     app.at("/new-actor").get(new_actor);
     app.at("/.well-known/webfinger").get(webfinger);
     app.listen("127.0.0.1:4000").await?;
