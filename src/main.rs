@@ -99,6 +99,12 @@ struct ApFollow {
     following: String,
 }
 
+#[derive(Debug, FromRow, Clone)]
+struct ApMessage {
+    guid: String,
+    message: String,
+}
+
 macro_rules! xdb {
     ($db:ident, $pool:ident, $tree: tt) => {
         match &$db {
@@ -250,6 +256,19 @@ async fn db_get_user(db: &DbPool, name: &str) -> Option<ApActor> {
     }
 }
 
+async fn db_get_message(db: &DbPool, guid: &str) -> Option<ApMessage> {
+    let msgs: Vec<ApMessage> = xdb!(db, pool, {
+        let select_query =
+            sqlx::query_as("SELECT guid, message FROM messages where guid=$1;").bind(guid);
+        select_query.fetch_all(pool).await.unwrap()
+    });
+    if msgs.len() == 0 {
+        None
+    } else {
+        Some(msgs[0].clone())
+    }
+}
+
 async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
     let WebfingerQuery { resource } = req.query()?;
     let mut json_reply = "".to_string();
@@ -375,6 +394,22 @@ fn get_actor_json(user: &ApActor) -> String {
 
     let json_reply = serde_json::to_string(&actor).unwrap();
     json_reply
+}
+
+async fn messages_handler(mut req: Request<AyTestState>) -> tide::Result {
+    let guid: String = req.param("guid")?.into();
+    if let Some(msg) = db_get_message(req.state().pool(), &guid).await {
+        Ok(Response::builder(200)
+            .body(msg.message.clone())
+            .header("content-type", "application/activity+json; charset=utf-8")
+            .header("cache-control", "max-age=60, public")
+            .build())
+    } else {
+        Ok(error_response(&format!(
+            "Message with guid {} not found",
+            &guid
+        )))
+    }
 }
 
 async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
@@ -957,6 +992,7 @@ async fn webservice_main(opts: &Opts) -> tide::Result<()> {
     // app.at("/request").get(request_url);
     app.at("/users/:username").get(users_handler);
     app.at("/users/:username/inbox").post(inbox_handler);
+    app.at("/messages/:guid").get(messages_handler);
     // app.at("/test-sign").get(test_sign);
     app.at("/.well-known/webfinger").get(webfinger);
     app.listen("127.0.0.1:4000").await?;
