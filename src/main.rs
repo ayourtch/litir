@@ -200,7 +200,7 @@ async fn db_set_follow(db: &DbPool, follower: &str, following: &str, active: boo
             xdb!(db, pool, {
                 let res = sqlx::query("DELETE FROM follows WHERE id=$1;")
                     .bind(follow.id.clone())
-                    .fetch_one(pool)
+                    .fetch_all(pool)
                     .await;
                 if res.is_err() {
                     println!("Error deleting follow");
