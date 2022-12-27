@@ -652,7 +652,7 @@ async fn get_db_pool(opts: &Opts) -> Result<DbPool, MyError> {
                 r#"
 CREATE TABLE IF NOT EXISTS actors (
   id integer primary key autoincrement,
-  username text,
+  username text unique not null,
   pubkey text,
   privkey text,
   name text,
@@ -668,7 +668,7 @@ CREATE TABLE IF NOT EXISTS actors (
                 r#"
 CREATE TABLE IF NOT EXISTS actors (
   id bigserial,
-  username text,
+  username text unique not null,
   pubkey text,
   privkey text,
   name text,
@@ -688,6 +688,9 @@ async fn create_actor_main(opts: &Opts, cao: &CreateActorOpts) -> tide::Result<(
     let db = get_db_pool(opts).await?;
     let res = create_actor(&db, cao).await;
     println!("New actor id: {}", res);
+    xdb!(db, pool, {
+        pool.close().await;
+    });
 
     Ok(())
 }

@@ -15,6 +15,13 @@ sudo certbot --nginx -d your.domain.name
 
 the domain x25.me is hardcoded so far in the code, while I am toying around with it all.
 
+= Running
+
+```
+cargo run -- -d sqlite://./test.sqlite3 create-actor --username testuser --name "Test User" --summary "This is just a test account"
+cargo run -- -d sqlite://./test.sqlite3 web-service
+```
+
 = Credits
 
 Thanks a lot to Darius Kazemi, whose guide at https://tinysubversions.com/notes/reading-activitypub/ - as well as his code, has inspired me to try out this experiment.
