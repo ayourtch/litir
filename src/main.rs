@@ -35,8 +35,7 @@ enum LitirOperation {
     CreateActor(CreateActorOpts),
 }
 
-/// This program does something useful, but its author needs to edit this.
-/// Else it will be just hanging around forever
+/// This is a little something, which does ActivityPub, to some extent.
 #[derive(Debug, Clone, ClapParser, Serialize, Deserialize)]
 #[clap(version = env!("GIT_VERSION"), author = "Andrew Yourtchenko <ayourtch@gmail.com>")]
 struct Opts {
