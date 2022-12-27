@@ -278,7 +278,6 @@ async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
         println!("   {}", &h);
     }
     let default_accept = format!("*/*").to_header_values().unwrap().collect();
-
     let accept = req.header("accept").unwrap_or(&default_accept);
     println!("Accept: {:#?}", &accept);
 
@@ -310,6 +309,95 @@ async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
             .content_type(mime::HTML)
             .build())
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AcceptMessage {
+    #[serde(rename = "@context")]
+    context: String,
+    id: String,
+    #[serde(rename = "type")]
+    typ: String,
+    actor: String,
+    object: String,
+}
+
+async fn verify_req(req: &Request<AyTestState>) -> Result<bool, tide::Error> {
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::sign::{Signer, Verifier};
+    use std::collections::HashMap;
+
+    //
+    // let j = req.body_json().await?;
+    let username: String = req.param("username")?.into();
+
+    if let Some(sig) = req.header("signature") {
+        let sig = sig[0].to_string();
+        let mut hm: HashMap<String, String> = Default::default();
+        println!("Found signature: '{}'", &sig);
+        for val in sig.split(",") {
+            if let Some((key, val)) = val.split_once("=") {
+                let key = key.to_string();
+                let val = if val.starts_with("\"") && val.ends_with("\"") {
+                    val[1..val.len() - 1].to_string()
+                } else {
+                    val.to_string()
+                };
+                hm.insert(key, val);
+            }
+        }
+        if let Some(url) = hm.get("keyId") {
+            let mut res: surf::Response = surf::get(url)
+                .header("accept", "application/activity+json")
+                .await?;
+            let data: String = res.body_string().await?;
+            //  println!("Data: {:#?}", &data);
+            let actor: serde_json::Value = serde_json::from_str(&data)?;
+            let actor_key = &actor["publicKey"]["publicKeyPem"];
+            println!("Actor pub key: {}", &actor_key);
+
+            let signature = openssl::base64::decode_block(&hm["signature"]).unwrap();
+
+            let comparison_string = hm["headers"]
+                .split(" ")
+                .map(|x| {
+                    if x == "(request-target)" {
+                        format!("(request-target): post /users/{}/inbox", &username)
+                    } else {
+                        format!("{}: {}", x, req.header(x).unwrap()[0])
+                    }
+                })
+                .collect::<Vec<String>>()
+                .join("\n");
+            println!("comp string: {:#?}", &comparison_string);
+            let key_text = actor_key.as_str().unwrap().replace(r#"\n"#, "\n");
+            println!("Key text: '{}'", &key_text);
+            let rsa = Rsa::public_key_from_pem(key_text.as_bytes()).unwrap();
+            let keypair = PKey::from_rsa(rsa).unwrap();
+            let mut verifier = Verifier::new(MessageDigest::sha256(), &keypair).unwrap();
+            verifier.update(comparison_string.as_bytes()).unwrap();
+            return Ok(verifier.verify(&signature).unwrap());
+        }
+        //    println!("Hash Map: {:#?}", &hm);
+    }
+    println!("fallthrough in verify_req");
+    Ok(false)
+}
+
+async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
+    let data: String = req.body_string().await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&data)?;
+    println!("J: {}", &v);
+
+    let result = verify_req(&req).await?;
+    println!("Verify result: {}", &result);
+
+    Ok(Response::builder(404)
+        .body("")
+        .header("cache-control", "max-age=60, public")
+        .build())
 }
 
 async fn make_user(db: &DbPool, name: &str) -> i64 {
@@ -436,6 +524,7 @@ CREATE TABLE IF NOT EXISTS actors (
     let mut app = tide::with_state(state);
     app.at("/request").get(request_url);
     app.at("/users/:username").get(users_handler);
+    app.at("/users/:username/inbox").post(inbox_handler);
     app.at("/test-sign").get(test_sign);
     app.at("/new-actor").get(new_actor);
     app.at("/.well-known/webfinger").get(webfinger);
