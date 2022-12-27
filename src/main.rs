@@ -587,9 +587,23 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                 Ok(error_response("Follow should be to a string object"))
             }
         } else if v["type"].as_str().unwrap() == "Undo" {
-            let v = &v["object"];
-            println!("Undo follow: {:#?}", &v);
-            Ok(error_response("Undo follow not implemented yet"))
+            if let Some(s) = v["object"]["object"].as_str() {
+                println!("Undo follow: {:#?}", &v);
+                let accept = AcceptMsg {
+                    context: "https://www.w3.org/ns/activitystreams".to_string(),
+                    id: format!("https://{}/{}", root_fqdn(), Uuid::new_v4()),
+                    typ: format!("Accept"),
+                    actor: s.to_string(),
+                    object: v.clone(),
+                };
+                let v = &v["object"];
+
+                let actor = v["actor"].as_str().unwrap().to_string();
+                let msg_text = serde_json::to_string(&accept).unwrap();
+                sign_and_send(req.state().pool(), &msg_text, &s, &actor).await
+            } else {
+                Ok(error_response("could not get the object"))
+            }
         } else {
             Ok(error_response("Unknown request"))
         }
