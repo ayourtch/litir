@@ -78,6 +78,13 @@ impl ApActor {
     }
 }
 
+#[derive(Debug, FromRow, Clone)]
+struct ApFollow {
+    id: i64,
+    follower: String,
+    following: String,
+}
+
 macro_rules! xdb {
     ($db:ident, $pool:ident, $tree: tt) => {
         match &$db {
@@ -149,6 +156,57 @@ fn root_fqdn() -> String {
         format!("{}", &fqdn)
     } else {
         format!("x25.me")
+    }
+}
+
+async fn db_set_follow(db: &DbPool, follower: &str, following: &str, active: bool) {
+    let follows: Vec<ApFollow> = xdb!(db, pool, {
+        let select_query = sqlx::query_as(
+            "SELECT id, follower, following FROM follows where follower=$1 and following=$2",
+        )
+        .bind(follower)
+        .bind(following);
+        select_query.fetch_all(pool).await.unwrap()
+    });
+
+    if active {
+        /* set the following relation */
+        if follows.len() == 0 {
+            /* need to insert a new one */
+            {
+                let newid = xdb!(db, pool, {
+                    let row: Result<(i64,), _> = sqlx::query_as(
+                        "INSERT INTO FOLLOWS (follower, following) VALUES ($1, $2) returning id;",
+                    )
+                    .bind(follower.clone())
+                    .bind(following.clone())
+                    .fetch_one(pool)
+                    .await;
+                    if let Ok(row) = row {
+                        row.0
+                    } else {
+                        println!("Error inserting a new follow!");
+                        -1
+                    }
+                });
+                println!("New follow {}=>{} id: {:?}", &follower, &following, newid);
+            }
+        }
+    } else {
+        /* clear the following relation */
+        for follow in follows {
+            /* need to delete */
+            println!("Deleting: {:#?}", &follow);
+            xdb!(db, pool, {
+                let res = sqlx::query("DELETE FROM follows WHERE id=$1;")
+                    .bind(follow.id.clone())
+                    .fetch_one(pool)
+                    .await;
+                if res.is_err() {
+                    println!("Error deleting follow");
+                }
+            });
+        }
     }
 }
 
@@ -577,6 +635,7 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
 
                 let actor = v["actor"].as_str().unwrap().to_string();
                 let msg_text = serde_json::to_string(&accept).unwrap();
+                db_set_follow(req.state().pool(), &actor, &s, true).await;
                 sign_and_send(req.state().pool(), &msg_text, &s, &actor).await
             } else {
                 Ok(error_response("Follow should be to a string object"))
@@ -595,6 +654,7 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
 
                 let actor = v["actor"].as_str().unwrap().to_string();
                 let msg_text = serde_json::to_string(&accept).unwrap();
+                db_set_follow(req.state().pool(), &actor, &s, false).await;
                 sign_and_send(req.state().pool(), &msg_text, &s, &actor).await
             } else {
                 Ok(error_response("could not get the object"))
@@ -698,6 +758,13 @@ async fn get_db_pool(opts: &Opts) -> Result<DbPool, MyError> {
         DbPool::Sqlite(pool) => {
             sqlx::query(
                 r#"
+CREATE TABLE IF NOT EXISTS follows (
+  id integer primary key autoincrement,
+  follower text not null,
+  following text not null,
+  UNIQUE(follower, following)
+);
+
 CREATE TABLE IF NOT EXISTS actors (
   id integer primary key autoincrement,
   username text unique not null,
@@ -714,6 +781,13 @@ CREATE TABLE IF NOT EXISTS actors (
         DbPool::Pg(pool) => {
             sqlx::query(
                 r#"
+CREATE TABLE IF NOT EXISTS follows (
+  id integer primary key autoincrement,
+  follower text not null,
+  following text not null,
+  UNIQUE(follower, following)
+);
+
 CREATE TABLE IF NOT EXISTS actors (
   id bigserial,
   username text unique not null,
