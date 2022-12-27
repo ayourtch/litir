@@ -28,11 +28,25 @@ struct CreateActorOpts {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ClapParser)]
+struct PostMessageOpts {
+    #[clap(
+        short = 'u',
+        long = "username",
+        help = "Username for the actor posting"
+    )]
+    username: String,
+    #[clap(short = 'm', long = "message", help = "The text of the message")]
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ClapParser)]
 enum LitirOperation {
     #[clap(name = "web-service", about = "Run the web service")]
     WebService,
     #[clap(name = "create-actor", about = "Create a new actor")]
     CreateActor(CreateActorOpts),
+    #[clap(name = "send-message", about = "send a message to the followers")]
+    PostMessage(PostMessageOpts),
 }
 
 /// This is a little something, which does ActivityPub, to some extent.
@@ -157,6 +171,16 @@ fn root_fqdn() -> String {
     } else {
         format!("x25.me")
     }
+}
+
+async fn db_get_follows_by_following(db: &DbPool, following: &str) -> Vec<ApFollow> {
+    let follows: Vec<ApFollow> = xdb!(db, pool, {
+        let select_query =
+            sqlx::query_as("SELECT id, follower, following FROM follows where following=$1")
+                .bind(following);
+        select_query.fetch_all(pool).await.unwrap()
+    });
+    follows
 }
 
 async fn db_set_follow(db: &DbPool, follower: &str, following: &str, active: bool) {
@@ -453,6 +477,7 @@ async fn verify_req(req: &Request<AyTestState>) -> Result<bool, tide::Error> {
                 .collect::<Vec<String>>()
                 .join("\n");
             // println!("comp string: {:#?}", &comparison_string);
+            //
             let key_text = actor_key.as_str().unwrap();
             // println!("Key text: '{}'", &key_text);
             let rsa = Rsa::public_key_from_pem(key_text.as_bytes()).unwrap();
@@ -670,6 +695,83 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct MessageActivity {
+    id: String,
+    #[serde(rename = "type")]
+    typ: String,
+    published: String,
+    attributedTo: String,
+    content: String,
+    to: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct CreateMessageActivity {
+    #[serde(rename = "@context")]
+    context: String, /* not quite right but will work for now */
+    id: String,
+    #[serde(rename = "type")]
+    typ: String,
+    actor: String,
+    to: Vec<String>,
+    cc: Vec<String>,
+    object: MessageActivity,
+}
+
+fn now_iso8601() -> String {
+    use chrono::DateTime;
+    use chrono::Utc;
+
+    let now: DateTime<Utc> = Utc::now();
+    let now_str = format!("{}", now.format("%+"));
+    now_str
+}
+
+async fn create_message(db: &DbPool, from_actor: &str, to_actor: &str, msg_text: &str) -> String {
+    use uuid::Uuid;
+    let note_guid = Uuid::new_v4();
+    let create_guid = Uuid::new_v4();
+
+    let msg = MessageActivity {
+        id: format!("https://{}/messages/{}", root_fqdn(), &note_guid),
+        typ: format!("Note"),
+        published: now_iso8601(),
+        attributedTo: from_actor.to_string(),
+        content: msg_text.to_string(),
+        to: vec![format!("https://www.w3.org/ns/activitystreams#Public")],
+    };
+
+    let create = CreateMessageActivity {
+        context: format!("https://www.w3.org/ns/activitystreams"),
+        id: format!("https://{}/messages/{}", root_fqdn(), &create_guid),
+        typ: format!("Create"),
+        actor: from_actor.to_string(),
+        to: vec![format!("https://www.w3.org/ns/activitystreams#Public")],
+        cc: vec![to_actor.to_string()],
+        object: msg.clone(),
+    };
+
+    let note_str = serde_json::to_string(&msg).unwrap();
+    let note_guid_str = format!("{}", &note_guid);
+    let create_str = serde_json::to_string(&create).unwrap();
+    let create_guid_str = format!("{}", &create_guid);
+    xdb!(db, pool, {
+        let res1 = sqlx::query("INSERT INTO messages (guid, message) values ($1, $2);")
+            .bind(note_guid_str.clone())
+            .bind(note_str.clone())
+            .fetch_all(pool)
+            .await;
+
+        let res2 = sqlx::query("INSERT INTO messages (guid, message) values ($1, $2);")
+            .bind(create_guid_str.clone())
+            .bind(create_str.clone())
+            .fetch_all(pool)
+            .await;
+    });
+    create_str
+}
+
 async fn create_actor(db: &DbPool, cao: &CreateActorOpts) -> i64 {
     use openssl::rsa::{Padding, Rsa};
     use openssl::symm::Cipher;
@@ -758,6 +860,11 @@ async fn get_db_pool(opts: &Opts) -> Result<DbPool, MyError> {
         DbPool::Sqlite(pool) => {
             sqlx::query(
                 r#"
+CREATE TABLE IF NOT EXISTS messages (
+    guid text primary key not null,
+    message text not null
+);
+
 CREATE TABLE IF NOT EXISTS follows (
   id integer primary key autoincrement,
   follower text not null,
@@ -781,6 +888,11 @@ CREATE TABLE IF NOT EXISTS actors (
         DbPool::Pg(pool) => {
             sqlx::query(
                 r#"
+CREATE TABLE IF NOT EXISTS messages (
+    guid text primary key not null,
+    message text not null
+);
+
 CREATE TABLE IF NOT EXISTS follows (
   id integer primary key autoincrement,
   follower text not null,
@@ -810,6 +922,25 @@ async fn create_actor_main(opts: &Opts, cao: &CreateActorOpts) -> tide::Result<(
     let db = get_db_pool(opts).await?;
     let res = create_actor(&db, cao).await;
     println!("New actor id: {}", res);
+    xdb!(db, pool, {
+        pool.close().await;
+    });
+
+    Ok(())
+}
+
+async fn post_message_main(opts: &Opts, pmo: &PostMessageOpts) -> tide::Result<()> {
+    let db = get_db_pool(opts).await?;
+    let sender = db_get_user(&db, &pmo.username).await.unwrap();
+    let sender_url = sender.get_actor_url();
+    let follows = db_get_follows_by_following(&db, &sender_url).await;
+    println!("follows len: {}", follows.len());
+    for follow in follows {
+        let follower = follow.follower.clone();
+        println!("Follower: {}", &follower);
+        let msg_text = create_message(&db, &sender_url, &follower, &pmo.message).await;
+        sign_and_send(&db, &msg_text, &sender_url, &follower).await;
+    }
     xdb!(db, pool, {
         pool.close().await;
     });
@@ -866,5 +997,6 @@ async fn main() -> tide::Result<()> {
     match opts.operation {
         LitirOperation::WebService => webservice_main(&opts).await,
         LitirOperation::CreateActor(ref cao) => create_actor_main(&opts, &cao).await,
+        LitirOperation::PostMessage(ref pmo) => post_message_main(&opts, &pmo).await,
     }
 }
