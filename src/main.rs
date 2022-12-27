@@ -393,6 +393,21 @@ struct AcceptMsg {
     object: serde_json::Value,
 }
 
+fn digest_str(msg_text: &str) -> String {
+    use openssl::hash::MessageDigest;
+    let hash = openssl::hash::hash(MessageDigest::sha256(), &msg_text.as_bytes()).unwrap();
+    let hash_out = openssl::base64::encode_block(&hash);
+    hash_out
+}
+
+fn error_response(msg: &str) -> tide::Response {
+    Response::builder(401)
+        .body(msg.to_string())
+        .header("content-type", "text/plain; charset=utf-8")
+        .header("cache-control", "max-age=60, public")
+        .build()
+}
+
 async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
     use chrono::{DateTime, Utc};
     use openssl::hash::MessageDigest;
@@ -403,10 +418,23 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
 
     use uuid::Uuid;
     let data: String = req.body_string().await.unwrap();
+    let hash_out = digest_str(&data);
+    if let Some(digest_hdr) = req.header("digest") {
+        let digest_str = digest_hdr[0].to_string();
+        if digest_str == format!("SHA-256={}", &hash_out) {
+            println!("Hash verification ok!");
+        } else {
+            return Ok(error_response("digest verification failed!"));
+        }
+    } else {
+        return Ok(error_response("digest header missing!"));
+    }
+
     let v: serde_json::Value = serde_json::from_str(&data)?;
     println!("J: {}", &v);
 
     let result = verify_req(&req).await?;
+
     println!("Verify result: {}", &result);
     if result {
         if v["type"].as_str().unwrap() == "Follow" {
@@ -442,14 +470,15 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                 let rsa = Rsa::private_key_from_pem_passphrase(
                     private_key_pem.as_bytes(),
                     passphrase.as_bytes(),
-                )
-                .unwrap();
+                );
+
+                if rsa.is_err() {
+                    return Ok(error_response(&format!("internal error: {:?}", &rsa)));
+                }
+                let rsa = rsa.unwrap();
 
                 let msg_text = serde_json::to_string(&accept).unwrap();
-
-                let hash =
-                    openssl::hash::hash(MessageDigest::sha256(), &msg_text.as_bytes()).unwrap();
-                let hash_out = openssl::base64::encode_block(&hash);
+                let hash_out = digest_str(&msg_text);
 
                 let now: DateTime<Utc> = Utc::now();
                 // let now_str = format!("{}", now.format("%a, %d %b %Y %T UTC"));
@@ -503,7 +532,7 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                     .body(msg_text)
                     .await?;
                 let data: String = res.body_string().await?;
-                println!("Result of reply: {:#?}", &data);
+                println!("Result of reply: {:#?}, code: {}", &data, &res.status());
             }
         }
         if v["type"].as_str().unwrap() == "Undo" {
