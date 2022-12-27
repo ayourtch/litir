@@ -77,6 +77,12 @@ struct ApActor {
     summary: String,
 }
 
+impl ApActor {
+    pub fn get_actor_url(&self) -> String {
+        format!("https://{}/users/{}", root_fqdn(), self.username)
+    }
+}
+
 macro_rules! xdb {
     ($db:ident, $pool:ident, $tree: tt) => {
         match &$db {
@@ -166,6 +172,7 @@ async fn db_get_user(db: &DbPool, name: &str) -> Option<ApActor> {
 async fn webfinger(mut req: Request<AyTestState>) -> tide::Result {
     let WebfingerQuery { resource } = req.query()?;
     let mut json_reply = "".to_string();
+    println!("Webfinger request for {}", &resource);
     if resource.starts_with("acct:") {
         let fqdn = &resource[5..];
         let name = fqdn.split("@").nth(0).unwrap();
@@ -244,6 +251,8 @@ struct UserJsonActivity {
     #[serde(rename = "type")]
     typ: String,
     preferredUsername: String,
+    name: String,
+    summary: String,
     inbox: String,
     publicKey: JsonActivityPublicKey,
 }
@@ -251,13 +260,13 @@ struct UserJsonActivity {
 fn get_actor_html(user: &ApActor) -> String {
     use std::fmt::Write;
     let mut out = format!("<html><body>\n");
-    writeln!(out, "<h1>{}</h1>", &user.name);
+    writeln!(out, "<h1>{}</h1>", &user.username);
     writeln!(out, "</body></html>");
     out
 }
 
 fn get_actor_json(user: &ApActor) -> String {
-    let user_url = format!("https://{}/users/{}", root_fqdn(), &user.name);
+    let user_url = user.get_actor_url();
 
     let publicKey = JsonActivityPublicKey {
         id: format!("{}#main-key", &user_url),
@@ -276,7 +285,9 @@ fn get_actor_json(user: &ApActor) -> String {
         context,
         typ: "Person".to_string(),
         id: user_url.clone(),
-        preferredUsername: user.name.clone(),
+        preferredUsername: user.username.clone(),
+        name: user.name.clone(),
+        summary: user.summary.clone(),
         inbox,
         publicKey,
     };
@@ -290,17 +301,19 @@ async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
     use http_types::headers::ToHeaderValues;
     let default_accept = format!("*/*").to_header_values().unwrap().collect();
     let accept = req.header("accept").unwrap_or(&default_accept);
-    println!("Accept: {:#?}", &accept);
-
+    let accept_str = format!("{}", accept[0]);
     let username: String = req.param("username")?.into();
+    println!(
+        "Actor request for: {} (accept_str: {})",
+        &username, &accept_str
+    );
     let maybe_actor = db_get_user(req.state().pool(), &username).await;
     if maybe_actor.is_none() {
         return Ok("Error".into());
     }
     let user = maybe_actor.unwrap();
-    let accept_str = format!("{}", accept[0]);
-    println!("Accept str: '{}'", &accept_str);
 
+    // FIXME: this is a royal hack :)
     if accept_str.starts_with("application/json")
         || accept_str.starts_with("application/activity+json")
         || accept_str.starts_with("application/ld+json")
