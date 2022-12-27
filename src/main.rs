@@ -150,7 +150,11 @@ struct WebfingerReply {
 }
 
 fn root_fqdn() -> String {
-    format!("x25.me")
+    if let Ok(fqdn) = std::env::var("LITIR_FQDN") {
+        format!("{}", &fqdn)
+    } else {
+        format!("x25.me")
+    }
 }
 
 async fn db_get_user(db: &DbPool, name: &str) -> Option<ApActor> {
@@ -752,6 +756,7 @@ async fn main() -> tide::Result<()> {
     }
 
     println!("Hello, here is your options: {:#?}", &opts);
+    println!("Your FQDN is: {}", root_fqdn());
 
     match opts.operation {
         LitirOperation::WebService => webservice_main(&opts).await,

@@ -12,12 +12,10 @@ Then configure https:
 sudo apt install certbot python3-certbot-nginx
 sudo certbot --nginx -d your.domain.name
 ```
-
-the domain x25.me is hardcoded so far in the code, while I am toying around with it all.
-
 = Running
 
 ```
+export LITIR_FQDN=your.domain.name
 cargo run -- -d sqlite://./test.sqlite3 create-actor --username testuser --name "Test User" --summary "This is just a test account"
 cargo run -- -d sqlite://./test.sqlite3 web-service
 ```
