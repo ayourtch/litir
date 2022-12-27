@@ -554,7 +554,7 @@ async fn make_user(db: &DbPool, name: &str) -> i64 {
 
     let passphrase = "litir_test";
 
-    let rsa = Rsa::generate(1024).unwrap();
+    let rsa = Rsa::generate(4096).unwrap();
     let private_key: Vec<u8> = rsa
         .private_key_to_pem_passphrase(Cipher::aes_128_cbc(), passphrase.as_bytes())
         .unwrap();
