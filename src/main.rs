@@ -40,10 +40,6 @@ enum LitirOperation {
 #[derive(Debug, Clone, ClapParser, Serialize, Deserialize)]
 #[clap(version = env!("GIT_VERSION"), author = "Andrew Yourtchenko <ayourtch@gmail.com>")]
 struct Opts {
-    /// Target hostname to do things on
-    #[clap(short, long, default_value = "localhost")]
-    target_host: String,
-
     /// Database path
     #[clap(short)]
     db: String,
