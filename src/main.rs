@@ -12,9 +12,28 @@ use tempfile::TempDir;
 use tide::prelude::*;
 use tide::{http::mime, Body, Redirect, Request, Response, Server, StatusCode};
 
+use core::str::FromStr;
 use handlebars::Handlebars;
 use std::collections::BTreeMap;
 use tide_handlebars::prelude::*;
+
+#[derive(Debug, Clone, Serialize, Deserialize, ClapParser)]
+struct CreateActorOpts {
+    #[clap(short = 'u', long = "username", help = "Username for the new actor")]
+    username: String,
+    #[clap(short = 'n', long = "name", help = "Name (human-readable)")]
+    name: String,
+    #[clap(short = 's', long = "summary", help = "Short summary about the actor")]
+    summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ClapParser)]
+enum LitirOperation {
+    #[clap(name = "web-service", about = "Run the web service")]
+    WebService,
+    #[clap(name = "create-actor", about = "Create a new actor")]
+    CreateActor(CreateActorOpts),
+}
 
 /// This program does something useful, but its author needs to edit this.
 /// Else it will be just hanging around forever
@@ -33,6 +52,10 @@ struct Opts {
     #[clap(short, long)]
     options_override: Option<String>,
 
+    /// Operation to do
+    #[clap(subcommand)]
+    operation: LitirOperation,
+
     /// A level of verbosity, and can be used multiple times
     #[clap(short, long, parse(from_occurrences))]
     verbose: i32,
@@ -47,9 +70,11 @@ use sqlx::{FromRow, Row};
 #[derive(Debug, FromRow, Clone)]
 struct ApActor {
     id: i64,
-    name: String,
+    username: String,
     pubkey: String,
     privkey: String,
+    name: String,
+    summary: String,
 }
 
 macro_rules! xdb {
@@ -100,18 +125,6 @@ async fn request_url(mut req: Request<AyTestState>) -> tide::Result {
 }
 
 #[derive(Deserialize)]
-struct NewActorQuery {
-    name: String,
-}
-
-async fn new_actor(mut req: Request<AyTestState>) -> tide::Result {
-    let NewActorQuery { name } = req.query()?; // .unwrap();
-    let id = make_user(&req.state().pool(), &name).await;
-
-    Ok("".into())
-}
-
-#[derive(Deserialize)]
 struct WebfingerQuery {
     resource: String,
 }
@@ -136,8 +149,10 @@ fn root_fqdn() -> String {
 
 async fn db_get_user(db: &DbPool, name: &str) -> Option<ApActor> {
     let users: Vec<ApActor> = xdb!(db, pool, {
-        let select_query =
-            sqlx::query_as("SELECT id, name, pubkey, privkey FROM actors where name=$1").bind(name);
+        let select_query = sqlx::query_as(
+            "SELECT id, username, pubkey, privkey, name, summary FROM actors where username=$1",
+        )
+        .bind(name);
         select_query.fetch_all(pool).await.unwrap()
     });
     // println!("Got: #{:?}", &users);
@@ -191,7 +206,7 @@ async fn test_sign(mut req: Request<AyTestState>) -> tide::Result {
     let maybe_actor = db_get_user(req.state().pool(), &name).await;
     let actor = maybe_actor.unwrap();
 
-    let private_key_pem = actor.privkey.clone().replace(r#"\n"#, "\n");
+    let private_key_pem = actor.privkey.clone();
     let passphrase = "litir_test";
 
     let rsa =
@@ -247,7 +262,7 @@ fn get_actor_json(user: &ApActor) -> String {
     let publicKey = JsonActivityPublicKey {
         id: format!("{}#main-key", &user_url),
         owner: user_url.clone(),
-        publicKeyPem: user.pubkey.clone().replace(r#"\n"#, "\n"),
+        publicKeyPem: user.pubkey.clone(),
     };
 
     let context = vec![
@@ -368,7 +383,7 @@ async fn verify_req(req: &Request<AyTestState>) -> Result<bool, tide::Error> {
                 .collect::<Vec<String>>()
                 .join("\n");
             // println!("comp string: {:#?}", &comparison_string);
-            let key_text = actor_key.as_str().unwrap().replace(r#"\n"#, "\n");
+            let key_text = actor_key.as_str().unwrap();
             // println!("Key text: '{}'", &key_text);
             let rsa = Rsa::public_key_from_pem(key_text.as_bytes()).unwrap();
             let keypair = PKey::from_rsa(rsa).unwrap();
@@ -464,7 +479,7 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                 let maybe_actor = db_get_user(req.state().pool(), &object_name).await;
                 let actor_obj = maybe_actor.unwrap();
 
-                let private_key_pem = actor_obj.privkey.clone().replace(r#"\n"#, "\n");
+                let private_key_pem = actor_obj.privkey.clone();
                 let passphrase = "litir_test";
 
                 let rsa = Rsa::private_key_from_pem_passphrase(
@@ -514,7 +529,7 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                     //  println!("Data: {:#?}", &data);
                     let actor: serde_json::Value = serde_json::from_str(&data)?;
                     let actor_key = &actor["publicKey"]["publicKeyPem"];
-                    let key_text = actor_key.as_str().unwrap().replace(r#"\n"#, "\n");
+                    let key_text = actor_key.as_str().unwrap();
                     let rsa = Rsa::public_key_from_pem(key_text.as_bytes()).unwrap();
                     let keypair = PKey::from_rsa(rsa).unwrap();
                     let mut verifier = Verifier::new(MessageDigest::sha256(), &keypair).unwrap();
@@ -547,7 +562,7 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
         .build())
 }
 
-async fn make_user(db: &DbPool, name: &str) -> i64 {
+async fn create_actor(db: &DbPool, cao: &CreateActorOpts) -> i64 {
     use openssl::rsa::{Padding, Rsa};
     use openssl::symm::Cipher;
     println!("Generate user");
@@ -568,11 +583,13 @@ async fn make_user(db: &DbPool, name: &str) -> i64 {
     {
         let newid = xdb!(db, pool, {
             let row: (i64,) = sqlx::query_as(
-                "insert into actors (name, pubkey, privkey) values ($1, $2, $3) returning id",
+                "insert into actors (username, pubkey, privkey, name, summary) values ($1, $2, $3, $4, $5) returning id",
             )
-            .bind(name)
-            .bind(pubkey.replace("\n", r#"\n"#))
-            .bind(privkey.replace("\n", r#"\n"#))
+            .bind(cao.username.clone())
+            .bind(pubkey)
+            .bind(privkey)
+            .bind(cao.name.clone())
+            .bind(cao.summary.clone())
             .fetch_one(pool)
             .await
             .unwrap();
@@ -582,6 +599,112 @@ async fn make_user(db: &DbPool, name: &str) -> i64 {
         println!("New id: {:?}", newid);
         newid
     }
+}
+
+use std::error;
+use std::fmt;
+
+#[derive(Debug)]
+struct MyError {
+    message: String,
+}
+
+impl fmt::Display for MyError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "MyError: {}", self.message)
+    }
+}
+
+impl error::Error for MyError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        None
+    }
+}
+
+async fn get_db_pool(opts: &Opts) -> Result<DbPool, MyError> {
+    use sqlx::Row;
+    let db = if opts.db.starts_with("sqlite://") {
+        let p = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect(&opts.db)
+            .await
+            .unwrap();
+        DbPool::Sqlite(p)
+    } else if opts.db.starts_with("postgresql://") {
+        let p = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&opts.db)
+            .await
+            .unwrap();
+        DbPool::Pg(p)
+    } else {
+        return Err(MyError {
+            message: format!(
+                "Need a database URL starting either from sqlite:// or from postgresql://"
+            ),
+        });
+    };
+    println!("Connected to a db");
+
+    match &db {
+        DbPool::Sqlite(pool) => {
+            sqlx::query(
+                r#"
+CREATE TABLE IF NOT EXISTS actors (
+  id integer primary key autoincrement,
+  username text,
+  pubkey text,
+  privkey text,
+  name text,
+  summary text
+);"#,
+            )
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        DbPool::Pg(pool) => {
+            sqlx::query(
+                r#"
+CREATE TABLE IF NOT EXISTS actors (
+  id bigserial,
+  username text,
+  pubkey text,
+  privkey text,
+  name text,
+  summary text
+);"#,
+            )
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    };
+    // make_user(&db, "testuser").await;
+    Ok(db)
+}
+
+async fn create_actor_main(opts: &Opts, cao: &CreateActorOpts) -> tide::Result<()> {
+    let db = get_db_pool(opts).await?;
+    let res = create_actor(&db, cao).await;
+    println!("New actor id: {}", res);
+
+    Ok(())
+}
+
+async fn webservice_main(opts: &Opts) -> tide::Result<()> {
+    let db = get_db_pool(opts).await?;
+
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let mut state = AyTestState::try_new(db)?;
+    let mut app = tide::with_state(state);
+    // app.at("/request").get(request_url);
+    app.at("/users/:username").get(users_handler);
+    app.at("/users/:username/inbox").post(inbox_handler);
+    // app.at("/test-sign").get(test_sign);
+    app.at("/.well-known/webfinger").get(webfinger);
+    app.listen("127.0.0.1:4000").await?;
+    Ok(())
 }
 
 #[async_std::main]
@@ -614,67 +737,8 @@ async fn main() -> tide::Result<()> {
 
     println!("Hello, here is your options: {:#?}", &opts);
 
-    use sqlx::Row;
-    let db = if opts.db.starts_with("sqlite://") {
-        let p = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect(&opts.db)
-            .await
-            .unwrap();
-        DbPool::Sqlite(p)
-    } else if opts.db.starts_with("postgresql://") {
-        let p = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&opts.db)
-            .await
-            .unwrap();
-        DbPool::Pg(p)
-    } else {
-        panic!("Need a database path");
-    };
-    println!("Connected to a db");
-
-    match &db {
-        DbPool::Sqlite(pool) => {
-            sqlx::query(
-                r#"
-CREATE TABLE IF NOT EXISTS actors (
-  id integer primary key autoincrement,
-  name text,
-  pubkey text,
-  privkey text
-);"#,
-            )
-            .execute(pool)
-            .await
-            .unwrap();
-        }
-        DbPool::Pg(pool) => {
-            sqlx::query(
-                r#"
-CREATE TABLE IF NOT EXISTS actors (
-  id bigserial,
-  name text,
-  pubkey text,
-  privkey text
-);"#,
-            )
-            .execute(pool)
-            .await
-            .unwrap();
-        }
-    };
-    // make_user(&db, "testuser").await;
-
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    let mut state = AyTestState::try_new(db)?;
-    let mut app = tide::with_state(state);
-    app.at("/request").get(request_url);
-    app.at("/users/:username").get(users_handler);
-    app.at("/users/:username/inbox").post(inbox_handler);
-    app.at("/test-sign").get(test_sign);
-    app.at("/new-actor").get(new_actor);
-    app.at("/.well-known/webfinger").get(webfinger);
-    app.listen("127.0.0.1:4000").await?;
-    Ok(())
+    match opts.operation {
+        LitirOperation::WebService => webservice_main(&opts).await,
+        LitirOperation::CreateActor(ref cao) => create_actor_main(&opts, &cao).await,
+    }
 }
