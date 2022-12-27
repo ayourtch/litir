@@ -440,6 +440,105 @@ fn error_response(msg: &str) -> tide::Response {
         .build()
 }
 
+async fn sign_and_send(
+    pool: &DbPool,
+    msg_text: &str,
+    from_actor: &str,
+    to_actor: &str,
+) -> tide::Result {
+    use chrono::{DateTime, Utc};
+    use openssl::hash::MessageDigest;
+    use openssl::pkey::PKey;
+    use openssl::rsa::Rsa;
+    use openssl::sign::{Signer, Verifier};
+    use std::fmt::Write;
+
+    // FIXME: make a better way
+    let object_name = from_actor
+        .replace(&format!("https://{}/users/", root_fqdn()), "")
+        .to_string();
+    assert!(!object_name.starts_with("https://"));
+    // FIXME: get their inbox
+    let inbox = format!("{}/inbox", &to_actor);
+    let inbox_url = surf::Url::parse(&inbox)?;
+    let inboxFragment = inbox_url.path();
+    let inboxHost = inbox_url.host().unwrap().to_string();
+
+    let maybe_actor = db_get_user(pool, &object_name).await;
+    let actor_obj = maybe_actor.unwrap();
+
+    let private_key_pem = actor_obj.privkey.clone();
+    let passphrase = "litir_test";
+
+    let rsa =
+        Rsa::private_key_from_pem_passphrase(private_key_pem.as_bytes(), passphrase.as_bytes());
+
+    if rsa.is_err() {
+        return Ok(error_response(&format!("internal error: {:?}", &rsa)));
+    }
+    let rsa = rsa.unwrap();
+
+    let hash_out = digest_str(&msg_text);
+
+    let now: DateTime<Utc> = Utc::now();
+    // let now_str = format!("{}", now.format("%a, %d %b %Y %T UTC"));
+    let now_str = format!("{}", now.format("%a, %-d %b %Y %X GMT"));
+    println!("NowStr: {}", &now_str);
+    let string_to_sign = format!(
+        "(request-target): post {}\nhost: {}\ndate: {}\ndigest: SHA-256={}",
+        &inboxFragment, &inboxHost, &now_str, &hash_out
+    );
+
+    println!("String to sign: '{}'", &string_to_sign);
+
+    let keypair = PKey::from_rsa(rsa).unwrap();
+
+    // Sign the data
+    let mut signer = Signer::new(MessageDigest::sha256(), &keypair).unwrap();
+    signer.update(&string_to_sign.as_bytes()).unwrap();
+    let signature = signer.sign_to_vec().unwrap();
+    let sig_out = openssl::base64::encode_block(&signature);
+
+    let sig_header = format!(
+        "keyId=\"{}\",headers=\"(request-target) host date digest\",signature=\"{}\"",
+        &format!("{}#main-key", from_actor),
+        &sig_out
+    );
+
+    /* verify */
+    {
+        let mut res: surf::Response = surf::get(from_actor)
+            .header("accept", "application/activity+json")
+            .await?;
+        let data: String = res.body_string().await?;
+        //  println!("Data: {:#?}", &data);
+        let actor: serde_json::Value = serde_json::from_str(&data)?;
+        let actor_key = &actor["publicKey"]["publicKeyPem"];
+        let key_text = actor_key.as_str().unwrap();
+        let rsa = Rsa::public_key_from_pem(key_text.as_bytes()).unwrap();
+        let keypair = PKey::from_rsa(rsa).unwrap();
+        let mut verifier = Verifier::new(MessageDigest::sha256(), &keypair).unwrap();
+        verifier.update(string_to_sign.as_bytes()).unwrap();
+        println!("Verify result: {:?}", verifier.verify(&signature).unwrap());
+    }
+    /* end verify */
+
+    let mut res: surf::Response = surf::post(inbox)
+        .header("host", inboxHost)
+        .header("date", now_str)
+        .header("digest", format!("SHA-256={}", hash_out))
+        .header("signature", sig_header)
+        .header("accept", "application/activity+json")
+        .body(msg_text)
+        .await?;
+    let data: String = res.body_string().await?;
+    println!("Result of reply: {:#?}, code: {}", &data, &res.status());
+    Ok(Response::builder(202)
+        .body("")
+        .header("cache-control", "max-age=60, public")
+        .build())
+}
+
 async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
     use chrono::{DateTime, Utc};
     use openssl::hash::MessageDigest;
@@ -473,10 +572,6 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
             if let Some(s) = v["object"].as_str() {
                 println!("Follow request to follow {}", &s);
 
-                let object_name = s
-                    .replace(&format!("https://{}/users/", root_fqdn()), "")
-                    .to_string();
-
                 let accept = AcceptMsg {
                     context: "https://www.w3.org/ns/activitystreams".to_string(),
                     id: format!("https://{}/{}", root_fqdn(), Uuid::new_v4()),
@@ -486,97 +581,24 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                 };
 
                 let actor = v["actor"].as_str().unwrap().to_string();
-
-                // FIXME: get their inbox
-                let inbox = format!("{}/inbox", &actor);
-                let inbox_url = surf::Url::parse(&inbox)?;
-                let inboxFragment = inbox_url.path();
-                let inboxHost = inbox_url.host().unwrap().to_string();
-
-                let maybe_actor = db_get_user(req.state().pool(), &object_name).await;
-                let actor_obj = maybe_actor.unwrap();
-
-                let private_key_pem = actor_obj.privkey.clone();
-                let passphrase = "litir_test";
-
-                let rsa = Rsa::private_key_from_pem_passphrase(
-                    private_key_pem.as_bytes(),
-                    passphrase.as_bytes(),
-                );
-
-                if rsa.is_err() {
-                    return Ok(error_response(&format!("internal error: {:?}", &rsa)));
-                }
-                let rsa = rsa.unwrap();
-
                 let msg_text = serde_json::to_string(&accept).unwrap();
-                let hash_out = digest_str(&msg_text);
-
-                let now: DateTime<Utc> = Utc::now();
-                // let now_str = format!("{}", now.format("%a, %d %b %Y %T UTC"));
-                let now_str = format!("{}", now.format("%a, %-d %b %Y %X GMT"));
-                println!("NowStr: {}", &now_str);
-                let string_to_sign = format!(
-                    "(request-target): post {}\nhost: {}\ndate: {}\ndigest: SHA-256={}",
-                    &inboxFragment, &inboxHost, &now_str, &hash_out
-                );
-
-                println!("String to sign: '{}'", &string_to_sign);
-
-                let keypair = PKey::from_rsa(rsa).unwrap();
-
-                // Sign the data
-                let mut signer = Signer::new(MessageDigest::sha256(), &keypair).unwrap();
-                signer.update(&string_to_sign.as_bytes()).unwrap();
-                let signature = signer.sign_to_vec().unwrap();
-                let sig_out = openssl::base64::encode_block(&signature);
-
-                let sig_header = format!(
-                    "keyId=\"{}\",headers=\"(request-target) host date digest\",signature=\"{}\"",
-                    &format!("{}#main-key", &s),
-                    &sig_out
-                );
-
-                /* verify */
-                {
-                    let mut res: surf::Response = surf::get(s)
-                        .header("accept", "application/activity+json")
-                        .await?;
-                    let data: String = res.body_string().await?;
-                    //  println!("Data: {:#?}", &data);
-                    let actor: serde_json::Value = serde_json::from_str(&data)?;
-                    let actor_key = &actor["publicKey"]["publicKeyPem"];
-                    let key_text = actor_key.as_str().unwrap();
-                    let rsa = Rsa::public_key_from_pem(key_text.as_bytes()).unwrap();
-                    let keypair = PKey::from_rsa(rsa).unwrap();
-                    let mut verifier = Verifier::new(MessageDigest::sha256(), &keypair).unwrap();
-                    verifier.update(string_to_sign.as_bytes()).unwrap();
-                    println!("Verify result: {:?}", verifier.verify(&signature).unwrap());
-                }
-                /* end verify */
-
-                let mut res: surf::Response = surf::post(inbox)
-                    .header("host", inboxHost)
-                    .header("date", now_str)
-                    .header("digest", format!("SHA-256={}", hash_out))
-                    .header("signature", sig_header)
-                    .header("accept", "application/activity+json")
-                    .body(msg_text)
-                    .await?;
-                let data: String = res.body_string().await?;
-                println!("Result of reply: {:#?}, code: {}", &data, &res.status());
+                sign_and_send(req.state().pool(), &msg_text, &s, &actor).await
+            } else {
+                Ok(error_response("Follow should be to a string object"))
             }
-        }
-        if v["type"].as_str().unwrap() == "Undo" {
+        } else if v["type"].as_str().unwrap() == "Undo" {
             let v = &v["object"];
             println!("Undo follow: {:#?}", &v);
+            Ok(error_response("Undo follow not implemented yet"))
+        } else {
+            Ok(error_response("Unknown request"))
         }
+    } else {
+        Ok(Response::builder(404)
+            .body("")
+            .header("cache-control", "max-age=60, public")
+            .build())
     }
-
-    Ok(Response::builder(404)
-        .body("")
-        .header("cache-control", "max-age=60, public")
-        .build())
 }
 
 async fn create_actor(db: &DbPool, cao: &CreateActorOpts) -> i64 {
