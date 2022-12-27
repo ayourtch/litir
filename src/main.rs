@@ -247,7 +247,7 @@ fn get_actor_json(user: &ApActor) -> String {
     let publicKey = JsonActivityPublicKey {
         id: format!("{}#main-key", &user_url),
         owner: user_url.clone(),
-        publicKeyPem: user.pubkey.clone(),
+        publicKeyPem: user.pubkey.clone().replace(r#"\n"#, "\n"),
     };
 
     let context = vec![
@@ -273,10 +273,6 @@ fn get_actor_json(user: &ApActor) -> String {
 async fn users_handler(mut req: Request<AyTestState>) -> tide::Result {
     use http_types::headers::HeaderValues;
     use http_types::headers::ToHeaderValues;
-    println!("Users handler");
-    for h in req.header_names() {
-        println!("   {}", &h);
-    }
     let default_accept = format!("*/*").to_header_values().unwrap().collect();
     let accept = req.header("accept").unwrap_or(&default_accept);
     println!("Accept: {:#?}", &accept);
@@ -479,6 +475,24 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                     &format!("{}#main-key", &s),
                     &sig_out
                 );
+
+                /* verify */
+                {
+                    let mut res: surf::Response = surf::get(s)
+                        .header("accept", "application/activity+json")
+                        .await?;
+                    let data: String = res.body_string().await?;
+                    //  println!("Data: {:#?}", &data);
+                    let actor: serde_json::Value = serde_json::from_str(&data)?;
+                    let actor_key = &actor["publicKey"]["publicKeyPem"];
+                    let key_text = actor_key.as_str().unwrap().replace(r#"\n"#, "\n");
+                    let rsa = Rsa::public_key_from_pem(key_text.as_bytes()).unwrap();
+                    let keypair = PKey::from_rsa(rsa).unwrap();
+                    let mut verifier = Verifier::new(MessageDigest::sha256(), &keypair).unwrap();
+                    verifier.update(string_to_sign.as_bytes()).unwrap();
+                    println!("Verify result: {:?}", verifier.verify(&signature).unwrap());
+                }
+                /* end verify */
 
                 let mut res: surf::Response = surf::post(inbox)
                     .header("host", inboxHost)
