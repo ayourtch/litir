@@ -1431,6 +1431,7 @@ name = "litir"
 version = "0.1.0"
 dependencies = [
  "async-std",
+ "chrono",
  "clap",
  "handlebars 4.3.6",
  "http-types",
@@ -1444,6 +1445,7 @@ dependencies = [
  "tempfile",
  "tide",
  "tide-handlebars",
+ "uuid",
 ]
 
 [[package]]
@@ -2788,6 +2790,15 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+]
+
+[[package]]
+name = "uuid"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "422ee0de9031b5b948b97a8fc04e3aa35230001a722ddd27943e0be31564ce4c"
+dependencies = [
+ "getrandom 0.2.8",
 ]
 
 [[package]]

@@ -20,5 +20,7 @@ surf = "*"
 sqlx = { version = "*", features = [ "runtime-async-std-native-tls", "postgres", "sqlite" ] }
 openssl = { version = "*" }
 http-types = { version = "*" }
+uuid = { version = "*", features = [ "v4" ]}
+chrono = { version = "*" }
 
 
