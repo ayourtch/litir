@@ -546,6 +546,7 @@ fn digest_str(msg_text: &str) -> String {
 }
 
 fn error_response(msg: &str) -> tide::Response {
+    println!("About to send the error-response: '{}'", msg);
     Response::builder(401)
         .body(msg.to_string())
         .header("content-type", "text/plain; charset=utf-8")
@@ -578,6 +579,12 @@ async fn sign_and_send(
     let inboxHost = inbox_url.host().unwrap().to_string();
 
     let maybe_actor = db_get_user(pool, &object_name).await;
+    if maybe_actor.is_none() {
+        return Ok(error_response(&format!(
+            "sender actor '{}' not found",
+            &object_name
+        )));
+    }
     let actor_obj = maybe_actor.unwrap();
 
     let private_key_pem = actor_obj.privkey.clone();
