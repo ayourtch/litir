@@ -668,6 +668,11 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
     use std::fmt::Write;
 
     use uuid::Uuid;
+    let inbox_username: String = req.param("username")?.into();
+    let inbox_actor = db_get_user(req.state().pool(), &inbox_username)
+        .await
+        .unwrap();
+    let inbox_actor_url = inbox_actor.get_actor_url();
     let data: String = req.body_string().await.unwrap();
     let hash_out = digest_str(&data);
     if let Some(digest_hdr) = req.header("digest") {
@@ -708,7 +713,9 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                 Ok(error_response("Follow should be to a string object"))
             }
         } else if v["type"].as_str().unwrap() == "Undo" {
-            if let Some(s) = v["object"]["object"].as_str() {
+            if let (Some(s), Some("follow")) =
+                (v["object"]["object"].as_str(), v["object"]["type"].as_str())
+            {
                 println!("Undo follow: {:#?}", &v);
                 let accept = AcceptMsg {
                     context: "https://www.w3.org/ns/activitystreams".to_string(),
@@ -727,7 +734,31 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                 Ok(error_response("could not get the object"))
             }
         } else {
-            Ok(error_response("Unknown request"))
+            if let Some(remote_actor) = v["actor"].as_str() {
+                let accept = AcceptMsg {
+                    context: "https://www.w3.org/ns/activitystreams".to_string(),
+                    id: format!("https://{}/{}", root_fqdn(), Uuid::new_v4()),
+                    typ: format!("Accept"),
+                    actor: inbox_actor_url.clone(),
+                    object: v.clone(),
+                };
+
+                let actor = v["actor"].as_str().unwrap().to_string();
+                let msg_text = serde_json::to_string(&accept).unwrap();
+
+                println!("blindly confirming: {}", &msg_text);
+                sign_and_send(
+                    req.state().pool(),
+                    &msg_text,
+                    &inbox_actor_url,
+                    &remote_actor,
+                )
+                .await
+            } else {
+                Ok(error_response(
+                    "Unknown request, could not figure out actor",
+                ))
+            }
         }
     } else {
         Ok(Response::builder(404)
