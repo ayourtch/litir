@@ -731,7 +731,31 @@ async fn inbox_handler(mut req: Request<AyTestState>) -> tide::Result {
                 db_set_follow(req.state().pool(), &actor, &s, false).await;
                 sign_and_send(req.state().pool(), &msg_text, &s, &actor).await
             } else {
-                Ok(error_response("could not get the object"))
+                if let Some(remote_actor) = v["actor"].as_str() {
+                    let accept = AcceptMsg {
+                        context: "https://www.w3.org/ns/activitystreams".to_string(),
+                        id: format!("https://{}/{}", root_fqdn(), Uuid::new_v4()),
+                        typ: format!("Accept"),
+                        actor: inbox_actor_url.clone(),
+                        object: v.clone(),
+                    };
+
+                    let actor = v["actor"].as_str().unwrap().to_string();
+                    let msg_text = serde_json::to_string(&accept).unwrap();
+
+                    println!("blindly confirming: {}", &msg_text);
+                    sign_and_send(
+                        req.state().pool(),
+                        &msg_text,
+                        &inbox_actor_url,
+                        &remote_actor,
+                    )
+                    .await
+                } else {
+                    Ok(error_response(
+                        "Unknown request, could not figure out actor",
+                    ))
+                }
             }
         } else {
             if let Some(remote_actor) = v["actor"].as_str() {
